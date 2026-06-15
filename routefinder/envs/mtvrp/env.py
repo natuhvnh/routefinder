@@ -276,6 +276,10 @@ class MTVRPEnv(RL4COEnvBase):
             "distance_limit", torch.full_like(demand_linehaul[..., :1], float("inf"))
         )
 
+        # distance and duration matrix
+        distance_matrix = td.get("distance_matrix", None)
+        duration_matrix = td.get("duration_matrix", None)
+
         # Create reset TensorDict
         td_reset = TensorDict(
             {
@@ -314,6 +318,8 @@ class MTVRPEnv(RL4COEnvBase):
                     dtype=torch.bool,
                     device=device,
                 ),
+                "distance_matrix": distance_matrix,
+                "duration_matrix": duration_matrix
             },
             batch_size=batch_size,
             device=device,
@@ -328,14 +334,12 @@ class MTVRPEnv(RL4COEnvBase):
         
         if "distance_matrix" in td:
             batch_size = curr_node.shape[0]
-            num_locs = locs.shape[1]
             distance_matrix = td["distance_matrix"]
             
-            # d_ij: distances from current node to all possible next nodes
-            curr_node_idx = curr_node.squeeze(-1)
-            batch_idx = torch.arange(batch_size, device=curr_node.device).unsqueeze(1)
-            all_nodes = torch.arange(num_locs, device=curr_node.device).unsqueeze(0)
-            d_ij = distance_matrix[batch_idx, curr_node_idx.unsqueeze(1), all_nodes]  # [batch, num_locs]
+            # d_ij: distances from current node to all possible next nodes [batch, num_locs]
+            batch_idx = torch.arange(batch_size, device=curr_node.device)
+            curr_node_idx = curr_node.reshape(batch_size)
+            d_ij = distance_matrix[batch_idx, curr_node_idx]
             
             # d_j0: distances from all nodes to depot (node 0)
             d_j0 = distance_matrix[:, :, 0]  # [batch, num_locs]
@@ -370,9 +374,7 @@ class MTVRPEnv(RL4COEnvBase):
         )
         if "duration_matrix" in td:
             # duration_matrix already contains travel time, no need to divide by speed
-            batch_idx = torch.arange(batch_size, device=curr_node.device).unsqueeze(1)
-            all_nodes = torch.arange(num_locs, device=curr_node.device).unsqueeze(0)
-            durations = td["duration_matrix"][batch_idx, curr_node_idx.unsqueeze(1), all_nodes]
+            durations = td["duration_matrix"][batch_idx, curr_node_idx]  # [batch, num_locs]
             arrival_time = td["current_time"] + durations
         else:
             arrival_time = td["current_time"] + (d_ij / td["speed"])

@@ -4,155 +4,121 @@ import pickle
 import time
 import requests
 import statistics
+import opt_utils
 
 
-def chunk_list(lst, size):
-    """Split list into chunks of given size."""
-    for i in range(0, len(lst), size):
-        yield lst[i : i + size]
+def process_backhaul_order(df):
+    source_name = statistics.mode(df["source_name"].tolist() + df["dest_name"].tolist())
+    df_delivery = df[df.source_name == source_name]
+    df_delivery = df_delivery.assign(backhaul=1)
+    #
+    df_pickup = df[~(df.source_name == source_name)]
+    for row in df_pickup.itertuples():
+        source_id = row.dest_id
+        source_name = row.dest_name
+        source_lat = row.dest_lat
+        source_long = row.dest_long
+        dest_id = row.source_id
+        dest_name = row.source_name + " pickup"
+        dest_lat = row.source_lat
+        dest_long = row.source_long
+        #
+        df_pickup.loc[row.Index, "source_id"] = source_id
+        df_pickup.loc[row.Index, "source_name"] = source_name
+        df_pickup.loc[row.Index, "source_lat"] = source_lat
+        df_pickup.loc[row.Index, "source_long"] = source_long
+        df_pickup.loc[row.Index, "dest_id"] = dest_id
+        df_pickup.loc[row.Index, "dest_name"] = dest_name
+        df_pickup.loc[row.Index, "dest_lat"] = dest_lat
+        df_pickup.loc[row.Index, "dest_long"] = dest_long
+    df_pickup = df_pickup.assign(backhaul=-1)
+    df = pd.concat([df_delivery, df_pickup], ignore_index=True)
+    return df
 
 
-#
-def get_ggmap_matrix_batched(points, mode="driving"):
-    """
-    Returns full distance and duration matrices by batching sub-requests.
-    points: list of (lat, lng)
-    """
-    n = len(points)
-    # choose batch size B, e.g. 10
-    B = 10
-    # initialize matrices
-    distances = [[None] * n for _ in range(n)]
-    durations = [[None] * n for _ in range(n)]
-
-    # Precompute str list
-    point_strs = [f"{lat},{lng}" for (lng, lat) in points]
-
-    # For each origin batch
-    speeds = []
-    for i_batch, origin_idxs in enumerate(chunk_list(range(n), B)):
-        origins = "|".join(point_strs[j] for j in origin_idxs)
-        # For each destination batch
-        for j_batch, dest_idxs in enumerate(chunk_list(range(n), B)):
-            destinations = "|".join(point_strs[k] for k in dest_idxs)
-
-            url = "https://maps.googleapis.com/maps/api/distancematrix/json"
-            params = {
-                "origins": origins,
-                "destinations": destinations,
-                "key": "",
-                "mode": mode,
-                # optionally departure_time etc.
-            }
-            resp = requests.get(url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("status") != "OK":
-                raise RuntimeError("Distance Matrix API error: " + str(data))
-
-            for i_rel, row in enumerate(data["rows"]):
-                i = origin_idxs[i_rel]
-                for j_rel, elem in enumerate(row["elements"]):
-                    j = dest_idxs[j_rel]
-                    if elem.get("status") == "OK":
-                        distance = elem["distance"]["value"] / 1000  # kilometers
-                        duration = elem["duration"]["value"]  # seconds
-                        if distance > 0:
-                            speed = distance / (duration / 3600)
-                            speeds.append(speed)
-                        distances[i][j] = distance
-                        durations[i][j] = duration
-                    else:
-                        distances[i][j] = None
-                        durations[i][j] = None
-
-    return distances, durations, statistics.mean(speeds)
+def process_order(df):
+    df = df[df.collection_date.notnull()]
+    df = df[df.collection_date >= "2025-01-01"]
+    df["height"] = np.where(
+        df["dimensionUnit"].str.lower() == "cm", df["height"] * 10, df["height"]
+    )
+    df["length"] = np.where(
+        df["dimensionUnit"].str.lower() == "cm", df["length"] * 10, df["length"]
+    )
+    df["width"] = np.where(
+        df["dimensionUnit"].str.lower() == "cm", df["width"] * 10, df["width"]
+    )
+    df["dimensionUnit"] = "mm"
+    for col in df.columns:
+        if df[col].dtype == "object":
+            df[col] = df[col].astype(str)
+    df["dest_name"] = df["dest_name"] + "_" + df["dest_id"]
+    df["collection_date"] = pd.to_datetime(df["collection_date"], format="%Y-%m-%d")
+    df["volume"] = (
+        df["quantity"] * df["height"] / 1000 * df["length"] / 1000 * df["width"] / 1000
+    )
+    df["stackable"] = df.apply(
+        lambda row: (
+            1 if (row["stack_on_top"] == "Y" and row["stack_on_other"] == "Y") else 0
+        ),
+        axis=1,
+    )
+    #
+    print("=" * 10 + " GET ORDERS = DONE " + "=" * 10)
+    return df
 
 
-#
-def get_tomtom_matrix_async(points, travelMode="car", batch_size=30):
-    base_url = "https://api.tomtom.com/routing/matrix/2"
-    api_key = ""
-    n = len(points)
-    print(f"Call Tomtom API with {n} locations")
-    # Initialize the master N x N matrices
-    distances = [[None] * n for _ in range(n)]
-    durations = [[None] * n for _ in range(n)]
-
-    # Prepare all destinations (we keep these constant for every batch)
-    dest_locations = [{"point": {"latitude": p[1], "longitude": p[0]}} for p in points]
-
-    # Loop through the points in batches
-    for start_idx in range(0, n, batch_size):
-        end_idx = min(start_idx + batch_size, n)
-        print(f"\n--- Processing Batch: Origins {start_idx} to {end_idx-1} ---")
-
-        # Prepare the subset of origins for this batch
-        batch_points = points[start_idx:end_idx]
-        origin_locations = [
-            {"point": {"latitude": p[1], "longitude": p[0]}} for p in batch_points
-        ]
-
-        payload = {
-            "origins": origin_locations,
-            "destinations": dest_locations,
-            "options": {"travelMode": travelMode},
+def pre_check(durations, locations, req_id, equipment, directory_ref):
+    dest_name = locations["dest_name"].tolist()
+    max_duration = max(durations[0])
+    if max_duration > equipment["maximumDrivingTimeInMinutes"].max():
+        max_duration_dest_name = dest_name[durations[0].index(max_duration) - 1]
+        message = f"The travelling time to {max_duration_dest_name} = {max_duration} minutes, which is higher than the max service duration = {equipment['maximumDrivingTimeInMinutes'].max()} minutes"
+        output = {
+            "status": False,
+            "id": req_id,
+            "note": message,
+            "directory_reference": directory_ref,
         }
-
-        # 1. SUBMIT THE JOB (POST)
-        submit_url = f"{base_url}/async?key={api_key}"
-        response = requests.post(submit_url, json=payload)
-        response.raise_for_status()
-
-        job_id = response.json().get("jobId")
-        print(f"Job submitted. ID: {job_id}")
-
-        # 2. POLL FOR STATUS (GET)
-        status_url = f"{base_url}/async/{job_id}?key={api_key}"
-        while True:
-            status_resp = requests.get(status_url)
-            status_data = status_resp.json()
-            status = status_data.get("state")
-
-            if status == "Completed":
-                print(f"Batch {start_idx//batch_size + 1} completed!")
-                break
-            elif status == "Failed":
-                print(f"\nBatch failed: {status_data}")
-                # Depending on your needs, you might want to 'continue' or 'break' here
-                break
-            else:
-                print(f"Status: {status}... waiting 5 seconds.", end="\r")
-                time.sleep(5)
-
-        # 3. FETCH RESULTS (GET)
-        result_url = f"{base_url}/async/{job_id}/result?key={api_key}"
-        result_resp = requests.get(result_url)
-        result_data = result_resp.json()
-
-        # 4. PARSE DATA into master matrix
-        # Note: The 'originIndex' in the response is relative to the batch.
-        # Add start_idx to map it back to the absolute index in your master list.
-        for element in result_data.get("data", []):
-            rel_origin_idx = element.get("originIndex")
-            dest_idx = element.get("destinationIndex")
-
-            abs_origin_idx = start_idx + rel_origin_idx
-
-            if "routeSummary" in element:
-                summary = element["routeSummary"]
-                distances[abs_origin_idx][dest_idx] = (
-                    summary["lengthInMeters"] / 1000
-                )  # km
-                durations[abs_origin_idx][dest_idx] = summary["travelTimeInSeconds"]
-    total_distance = np.sum(distances)  # km
-    total_time_hours = np.sum(durations) / 3600  # hours
-    speed = total_distance / total_time_hours
-    # Final return now happens AFTER all batches are processed
-    return distances, durations, speed
+        opt_utils.build_route(output)
+        raise ValueError(message)
+    #
+    location_name = []
+    travel_time = []
+    service_time_window = []
+    order_number = []
+    order_id = []
+    for index, row in locations.iterrows():
+        travel_time_constraint = (
+            row["delivery_end_minutes_of_day"] - row["delivery_start_minutes_of_day"]
+        )
+        travel_time_actual = durations[0][index + 1]
+        if travel_time_actual > travel_time_constraint:
+            location_name.append(row["dest_name"].split("_")[0])
+            travel_time.append(str(travel_time_actual))
+            service_time_window.append(
+                f"{row['delivery_time_start']} and {row['delivery_time_end']}"
+            )
+            order_number.append(row["dest_name"].split("_")[-1])
+            order_id.extend(row["unit_id"])
+    if len(location_name) > 0:
+        message = (
+            f"The travelling time to {', '.join(location_name)}: {', '.join(travel_time)} minutes, respectively."
+            f" Out of service time windows between {', '.join(service_time_window)}."
+            f" Order number: {', '.join(order_number)}."
+            f" Order id: {' '.join(order_id)}"
+        )
+        output = {
+            "status": False,
+            "id": req_id,
+            "note": message,
+            "directory_reference": directory_ref,
+        }
+        opt_utils.build_route(output)
+        raise ValueError(message)
+    return True
 
 
-#
 def get_proxy_volume(g, num_stack, unit_type, equipment, biggest_equipment):
     equipment = equipment[equipment.code == biggest_equipment]
     max_height = equipment["internalHeightMillimeter"].iloc[0].item() / 1000
@@ -204,7 +170,6 @@ def get_proxy_volume(g, num_stack, unit_type, equipment, biggest_equipment):
     return pd.Series({"proxy_volume": proxy_volume, "proxy_pse": proxy_pse})
 
 
-#
 def capacity_check(
     locations,
     distances,
@@ -337,9 +302,15 @@ def capacity_check(
     return locations, routes
 
 
-#
 def process_account(
-    df, num_stack, unit_type, equipment, biggest_equipment, variant, req_id
+    df,
+    num_stack,
+    unit_type,
+    equipment,
+    biggest_equipment,
+    variant,
+    req_id,
+    directory_ref,
 ):
     proxy_volume = (
         df.groupby(["source_name", "dest_name"])
@@ -352,8 +323,6 @@ def process_account(
         )
         .reset_index()
     )
-    #
-    order_id = df.groupby("order_number")["id"].apply(list).to_dict()
     #
     locations = (
         df.groupby(["source_name", "dest_name"])
@@ -368,18 +337,25 @@ def process_account(
             delivery_time_end=("delivery_time_end", "max"),
             quantity=("quantity", "sum"),
             num_order=("id", "count"),
+            backhaul=("backhaul", lambda x: x.mode().iloc[0]),
+            source_location_id=("source_location_id", lambda x: x.mode().iloc[0]),
+            dest_location_id=("dest_location_id", lambda x: x.mode().iloc[0]),
             height=("height", list),
             length=("length", list),
             width=("width", list),
             unit_id=("id", list),
+            order_number=("order_number", list),
         )
         .reset_index()
     )
-    locations = locations.merge(proxy_volume, how="left", on=["source_name", "dest_name"])
+    locations["order_number_id"] = locations[
+        ["order_number", "unit_id"]
+    ].values.tolist()
+    locations = locations.drop(["order_number"], axis=1)
+    locations = locations.merge(
+        proxy_volume, how="left", on=["source_name", "dest_name"]
+    )
     #
-    # locations["delivery_time_end"] = (
-    #     locations["delivery_time_end"].replace("06:00", "18:00")
-    # )
     locations["delivery_time_start"] = (
         locations["delivery_time_start"].replace("nan", "00:00") + ":00"
     )
@@ -397,59 +373,51 @@ def process_account(
         pd.to_datetime(locations["delivery_time_end"], format="%H:%M:%S").dt.hour * 60
         + pd.to_datetime(locations["delivery_time_end"], format="%H:%M:%S").dt.minute
     )
+    order_number_id = locations["order_number_id"].tolist()
     #
-    locations = locations[locations.dest_long > -5].reset_index(drop=True)
-    #
-    # solver_utils.location_visualization(locations)
-    #
-    depot = locations[["source_long", "source_lat"]].drop_duplicates().values.tolist()[0]
+    depot = (
+        locations[["source_long", "source_lat"]].drop_duplicates().values.tolist()[0]
+    )
     dest_names = locations["dest_name"].tolist()
     source_name = df.loc[0, "source_name"] + "_" + df.loc[0, "source_id"]
     dest_names.insert(0, source_name)
-    coordinates = [tuple(x) for x in locations[["dest_long", "dest_lat"]].values.tolist()]
+    coordinates = [
+        tuple(x) for x in locations[["dest_long", "dest_lat"]].values.tolist()
+    ]
     coordinates.insert(0, (depot[0], depot[1]))
-    # distances, durations, speed = get_ggmap_matrix_batched(coordinates, mode="driving")
-    # distances, durations, speed = get_tomtom_matrix_async(coordinates, batch_size=25)
-    # with open("temp_data/distances.pkl", "wb") as file:
-    #     pickle.dump(distances, file)
-    # with open("temp_data/durations.pkl", "wb") as file:
-    #     pickle.dump(durations, file)
-    # with open("temp_data/speed.pkl", "wb") as file:
-    #     pickle.dump(speed, file)
-    #
-    with open("temp_data/distances.pkl", "rb") as file:
-        distances = pickle.load(file)
-    with open("temp_data/durations.pkl", "rb") as file:
-        durations = pickle.load(file)
-    with open("temp_data/speed.pkl", "rb") as file:
-        speed = pickle.load(file)
-    durations = [[int(x / 60) for x in sublist] for sublist in durations]
-    distances = [[int(x) for x in sublist] for sublist in distances]
+    address_guids = locations["dest_location_id"].tolist()
+    address_guids.insert(0, locations["source_location_id"].mode()[0])
+    distances, durations = opt_utils.get_location_matrix(
+        coordinates, address_guids, req_id, order_number_id, directory_ref
+    )
+    total_distance = np.sum(distances)  # km
+    total_time_hours = np.sum(durations) / 60  # hours
+    speed = total_distance / total_time_hours
     #
     locations, full_load_route = capacity_check(
         locations, distances, durations, equipment, biggest_equipment, variant
     )
+    locations["weight"] = locations["weight"] * locations["backhaul"]
+    locations["proxy_volume"] = locations["proxy_volume"] * locations["backhaul"]
+    locations["proxy_pse"] = locations["proxy_pse"] * locations["backhaul"]
     #
     weights = locations["weight"].tolist()
     weights.insert(0, 0)
-    # weights = [int(i) for i in weights]
     #
     volumes = locations["proxy_volume"].tolist()
     volumes.insert(0, 0)
-    # volumes = [int(i) for i in volumes]
     #
     pallets = locations["proxy_pse"].tolist()
     pallets.insert(0, 0)
-    # pallets = [int(i) for i in pallets]
     #
     time_windows = locations[
         ["delivery_start_minutes_of_day", "delivery_end_minutes_of_day"]
     ].values.tolist()
     time_windows.insert(0, (0, 1440))
-    print("=" * 10 + "PROCESS ACCOUNT ORDERS = DONE" + "=" * 10)
+    print("=" * 10 + " PROCESS ACCOUNT ORDERS = DONE " + "=" * 10)
     return (
         locations,
-        order_id,
+        order_number_id,
         full_load_route,
         dest_names,
         coordinates,
@@ -459,5 +427,6 @@ def process_account(
         distances,
         time_windows,
         durations,
-        speed,
+        address_guids,
+        speed
     )

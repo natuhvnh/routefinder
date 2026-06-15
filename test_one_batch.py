@@ -221,8 +221,8 @@ def extract_routes_from_actions(actions, drop_empty_routes=True, is_open=False):
 #
 if __name__ == "__main__":
     # data_path = "3t_data/b2d8731b-4d6f-4e1d-80cf-c46ef29908e9.json" # 100
-    # data_path = "3t_data/184d181a-0630-49a7-b8c5-2f94f634ee3e.json" # 76
-    data_path = "3t_data/208244c0-8aee-4bc0-971e-ae8909428301.json" # 46
+    data_path = "3t_data/184d181a-0630-49a7-b8c5-2f94f634ee3e.json" # 73
+    # data_path = "3t_data/208244c0-8aee-4bc0-971e-ae8909428301.json" # 46
     with open(data_path, "r") as file:
         data = json.load(file)
     variant = data["variant"]
@@ -356,7 +356,6 @@ if __name__ == "__main__":
     actions = evaluate(model, td_reset.clone(), env)["best_aug_actions"]
     with open('output/actions.pkl', 'wb') as f:
         pickle.dump(actions, f)
-    inference_time = time.time() - start
 
     # Obtain reward from the environment with new locs
     # td_reset["locs"] = coordinates_scaled[0][None]  # unnormalized

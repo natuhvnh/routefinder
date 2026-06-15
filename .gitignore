@@ -185,3 +185,9 @@ examples/
 LICENSE
 Pipfile
 Pipfile.lock
+test_one_batch_review.md
+.env
+.github
+temp_data
+temp_data_46
+output/*
