@@ -199,9 +199,13 @@ class Bin:
         """
         Checks the stability of the item at the specified pivot point.
 
+        Y is the vertical axis. An item is supported if the footprint overlap on
+        the X–Z plane between the new item's bottom (pivot[1]) and the top face of
+        already-placed items (fit_item[3]) is sufficient.
+
         Args:
-            dimension (list): The dimensions of the item.
-            pivot (list): The pivot point for placing the item.
+            dimension (list): The dimensions of the item (width, height, depth).
+            pivot (list): The pivot point (x, y, z) for placing the item.
 
         Returns:
             bool: True if the item is stable, False otherwise.
@@ -210,13 +214,17 @@ class Bin:
         if pivot[1] == 0:
             return True
 
-        item_area_lower = dimension[0] * dimension[1]
+        # Footprint is the X–Z face (width × depth).
+        item_area_lower = dimension[0] * dimension[2]
         support_area_upper = 0
         for fit_item in self.fit_items:
-            if pivot[2] == fit_item[5]:
+            # fit_item layout: [x0, x1, y0, y1, z0, z1]
+            # Support exists when the placed item's top face (y1 == fit_item[3])
+            # aligns with the new item's bottom (pivot[1]).
+            if pivot[1] == fit_item[3]:
                 area = (
-                    _overlap_len(pivot[0], pivot[0] + dimension[0], fit_item[0], fit_item[1]) *
-                    _overlap_len(pivot[1], pivot[1] + dimension[1], fit_item[2], fit_item[3])
+                    _overlap_len(pivot[0], pivot[0] + dimension[0], fit_item[0], fit_item[1]) *  # X
+                    _overlap_len(pivot[2], pivot[2] + dimension[2], fit_item[4], fit_item[5])    # Z
                 )
                 support_area_upper += area
 
@@ -229,24 +237,30 @@ class Bin:
         """
         Checks the support of the vertices of the item at the specified pivot point.
 
+        Y is the vertical axis. The four footprint corners are in the X–Z plane.
+        A vertex is considered supported when it lies within the X–Z footprint of a
+        placed item whose top face (fit_item[3]) matches the new item's bottom (pivot[1]).
+
         Args:
-            dimension (list): The dimensions of the item.
-            pivot (list): The pivot point for placing the item.
+            dimension (list): The dimensions of the item (width, height, depth).
+            pivot (list): The pivot point (x, y, z) for placing the item.
 
         Returns:
-            bool: True if all vertices are supported, False otherwise.
+            bool: True if all four footprint corners are supported, False otherwise.
         """
+        # Four corners of the X–Z footprint.
         four_vertices = [
-            [pivot[0], pivot[1]],
-            [pivot[0] + dimension[0], pivot[1]],
-            [pivot[0], pivot[1] + dimension[1]],
-            [pivot[0] + dimension[0], pivot[1] + dimension[1]]
+            [pivot[0],                  pivot[2]],
+            [pivot[0] + dimension[0],   pivot[2]],
+            [pivot[0],                  pivot[2] + dimension[2]],
+            [pivot[0] + dimension[0],   pivot[2] + dimension[2]],
         ]
         c = [False] * 4
         for fit_item in self.fit_items:
-            if pivot[2] == fit_item[5]:
+            # fit_item layout: [x0, x1, y0, y1, z0, z1]
+            if pivot[1] == fit_item[3]:
                 for idx, vertex in enumerate(four_vertices):
-                    if (fit_item[0] <= vertex[0] <= fit_item[1]) and (fit_item[2] <= vertex[1] <= fit_item[3]):
+                    if (fit_item[0] <= vertex[0] <= fit_item[1]) and (fit_item[4] <= vertex[1] <= fit_item[5]):
                         c[idx] = True
         return all(c)
 

@@ -248,6 +248,20 @@ def upload_file_to_blob(connection_string, container_name, blob_name, data):
     return
 
 
+def cosmos_upsert_data(DATABASE_NAME, CONTAINER_NAME, data):
+    # Cosmos DB credentials
+    URL = opt_config.cosmos_url
+    KEY = opt_config.cosmos_key
+    # Create client
+    client = CosmosClient(URL, credential=KEY)
+    # Get database & container
+    database = client.get_database_client(DATABASE_NAME)
+    container = database.get_container_client(CONTAINER_NAME)
+    # Insert / update (UPSERT)
+    container.upsert_item(data)
+    return
+
+
 def build_route(data):
     url = opt_config.build_route_url
     headers = {"Ocp-Apim-Subscription-Key": opt_config.build_route_api_key}

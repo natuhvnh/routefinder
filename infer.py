@@ -367,7 +367,7 @@ def get_route_output(
                     visit["visit_name"] = visit_name
                     visit["directoryReference"] = directoryReference
                     visit["orderIds"] = orderids
-                    visit["order_number"] = [order_number]
+                    visit["order_number"] = order_number
                     visits.append(visit)
                 last_visit_name = visit_name
         source_info = {
@@ -616,5 +616,6 @@ output = get_route_output(
     runtime,
 )
 print(f"\nTotal Run Time: {runtime}s")
+opt_utils.cosmos_upsert_data('hgs-output', 'route', output)
 # opt_utils.build_route(output)
 
