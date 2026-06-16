@@ -14,8 +14,8 @@ torchrl.data.tensor_specs.UnboundedContinuousTensorSpec = (
     torchrl.data.tensor_specs.UnboundedContinuous
 )
 from routefinder.models.model import RouteFinderBase, RouteFinderMoE
-from routefinder.models.baselines.mvmoe.model import MVMoE
-from routefinder.models.baselines.mtpomo.model import MTPOMO
+# from routefinder.models.baselines.mvmoe.model import MVMoE
+# from routefinder.models.baselines.mtpomo.model import MTPOMO
 from routefinder.envs.mtvrp import MTVRPEnv, MTVRPGenerator
 import time
 import argparse
@@ -507,115 +507,115 @@ if __name__ == "__main__":
     elif unit_type == "Volume":
         capacity = equipment[equipment.name == biggest_equipment]["volume"].values[0]
     scale_factor = 0.2  # 3, 0.2
-min_coord = np.array(coordinates).min(axis=0)
-max_coord = np.array(coordinates).max(axis=0)
-coord_range = max_coord - min_coord
-distance_scaler = coord_range.max()
-coordinates_scaled = (np.array(coordinates) - min_coord) / distance_scaler
-coordinates_scaled = np.expand_dims(coordinates_scaled, axis=0)
-# coordinates = np.expand_dims(coordinates, axis=0)
-#
-max_time_window = 1440
-time_scaler = max_time_window / scale_factor  # 1440/3
-service_time = np.array([opt_config.client_service_duration] * (len(weights) - 1))
-service_time = torch.Tensor(service_time.reshape((1, -1))) / time_scaler
-tw_start = (
-    torch.Tensor(
-        np.array(locations["delivery_start_minutes_of_day"].tolist()).reshape((1, -1))
+    min_coord = np.array(coordinates).min(axis=0)
+    max_coord = np.array(coordinates).max(axis=0)
+    coord_range = max_coord - min_coord
+    distance_scaler = coord_range.max()
+    coordinates_scaled = (np.array(coordinates) - min_coord) / distance_scaler
+    coordinates_scaled = np.expand_dims(coordinates_scaled, axis=0)
+    # coordinates = np.expand_dims(coordinates, axis=0)
+    #
+    max_time_window = 1440
+    time_scaler = max_time_window / scale_factor  # 1440/3
+    service_time = np.array([opt_config.client_service_duration] * (len(weights) - 1))
+    service_time = torch.Tensor(service_time.reshape((1, -1))) / time_scaler
+    tw_start = (
+        torch.Tensor(
+            np.array(locations["delivery_start_minutes_of_day"].tolist()).reshape((1, -1))
+        )
+        / time_scaler
+    )  # [1, n]
+    tw_end = (
+        torch.Tensor(
+            np.array(locations["delivery_end_minutes_of_day"].tolist()).reshape((1, -1))
+        )
+        / time_scaler
+    )  # [1, n]
+    depot_tw, depot_service_time = torch.tensor([[0.0, scale_factor]]), torch.zeros(
+        (1, 1), device=service_time.device
     )
-    / time_scaler
-)  # [1, n]
-tw_end = (
-    torch.Tensor(
-        np.array(locations["delivery_end_minutes_of_day"].tolist()).reshape((1, -1))
+    tw = torch.stack([tw_start.squeeze(0), tw_end.squeeze(0)], dim=1)
+    tw = torch.cat([depot_tw, tw], dim=0)
+    service_time = torch.cat([depot_service_time, service_time], dim=1)
+    if unit_type == "Volume":
+        node_demand = np.array(volumes[1:])
+        node_demand = torch.Tensor(node_demand.reshape((1, -1))) / capacity
+    elif unit_type == "Pallet":
+        node_demand = np.array(pallets[1:])
+        node_demand = torch.Tensor(node_demand.reshape((1, -1))) / (capacity + 0.1)  # [1, n]
+    speed = speed / 60 * time_scaler
+    distances_limit = 900
+    distance_matrix_scaler = 3
+    distances_scaled = np.array(distances) * distance_matrix_scaler / distances_limit
+    durations_scaled = np.array(durations) / time_scaler
+    is_open = True if "o" in variant else False
+    td_instance = TensorDict(
+        {
+            "locs": torch.from_numpy(coordinates_scaled[0]).float(),
+            "demand_linehaul": node_demand[0],
+            "capacity_original": torch.tensor([capacity]),
+            "service_time": service_time[0],
+            "speed": torch.tensor([speed]).float(),
+            "time_windows": tw,
+            "distance_limit": torch.tensor([distance_matrix_scaler]).float(),
+            "distance_matrix": torch.from_numpy(distances_scaled).float(),
+            "duration_matrix": torch.from_numpy(durations_scaled).float(),
+            "open_route": torch.tensor([is_open], dtype=torch.bool),
+        },
+        batch_size=[],
+    )[None]
+    #
+    if variant == "ovrptw":
+        variant_preset = "ovrpltw"
+    elif variant == "vrptw":
+        variant_preset = "vrpltw"
+    device = "cpu"
+    PATH = "checkpoints/100/rf-transformer.ckpt"
+    model = RouteFinderBase.load_from_checkpoint(
+        PATH, map_location=device, weights_only=False
     )
-    / time_scaler
-)  # [1, n]
-depot_tw, depot_service_time = torch.tensor([[0.0, scale_factor]]), torch.zeros(
-    (1, 1), device=service_time.device
-)
-tw = torch.stack([tw_start.squeeze(0), tw_end.squeeze(0)], dim=1)
-tw = torch.cat([depot_tw, tw], dim=0)
-service_time = torch.cat([depot_service_time, service_time], dim=1)
-if unit_type == "Volume":
-    node_demand = np.array(volumes[1:])
-    node_demand = torch.Tensor(node_demand.reshape((1, -1))) / capacity
-elif unit_type == "Pallet":
-    node_demand = np.array(pallets[1:])
-    node_demand = torch.Tensor(node_demand.reshape((1, -1))) / (capacity + 0.1)  # [1, n]
-speed = speed / 60 * time_scaler
-distances_limit = 900
-distance_matrix_scaler = 3
-distances_scaled = np.array(distances) * distance_matrix_scaler / distances_limit
-durations_scaled = np.array(durations) / time_scaler
-is_open = True if "o" in variant else False
-td_instance = TensorDict(
-    {
-        "locs": torch.from_numpy(coordinates_scaled[0]).float(),
-        "demand_linehaul": node_demand[0],
-        "capacity_original": torch.tensor([capacity]),
-        "service_time": service_time[0],
-        "speed": torch.tensor([speed]).float(),
-        "time_windows": tw,
-        "distance_limit": torch.tensor([distance_matrix_scaler]).float(),
-        "distance_matrix": torch.from_numpy(distances_scaled).float(),
-        "duration_matrix": torch.from_numpy(durations_scaled).float(),
-        "open_route": torch.tensor([is_open], dtype=torch.bool),
-    },
-    batch_size=[],
-)[None]
-#
-if variant == "ovrptw":
-    variant_preset = "ovrpltw"
-elif variant == "vrptw":
-    variant_preset = "vrpltw"
-device = "cpu"
-PATH = "checkpoints/100/rf-transformer.ckpt"
-model = RouteFinderBase.load_from_checkpoint(
-    PATH, map_location=device, weights_only=False
-)
-model.eval().to(device)
-policy = model.policy
-policy = policy.to(device).eval()
-generator = MTVRPGenerator(num_loc=100, variant_preset=variant_preset)
-env = MTVRPEnv(generator, check_solution=True).to(device)  # Add .to(device) here
-td_instance = td_instance.to(device)
-td_reset = env.reset(td_instance).to(device)
-actions = evaluate(model, td_reset.clone(), env)["best_aug_actions"]
-routes = extract_routes_from_actions(actions, is_open=is_open)
-#
-route_delivery = get_route_delivery(
-    df,
-    equipment,
-    routes[0],
-    order_number_id,
-    num_stack,
-    unit_type,
-    distances,
-    durations,
-    pallets,
-    weights,
-    volumes,
-    time_windows,
-)
-runtime = time.perf_counter() - start_time
-output = get_route_output(
-    req_id,
-    directory_ref,
-    col_date,
-    routes[0],
-    locations,
-    route_delivery,
-    variant,
-    dest_names,
-    order_number_id,
-    address_guids,
-    distances,
-    durations,
-    full_load_route,
-    runtime,
-)
-print(f"\nTotal Run Time: {runtime}s")
-opt_utils.cosmos_upsert_data('hgs-output', 'route', output)
+    model.eval().to(device)
+    policy = model.policy
+    policy = policy.to(device).eval()
+    generator = MTVRPGenerator(num_loc=100, variant_preset=variant_preset)
+    env = MTVRPEnv(generator, check_solution=True).to(device)  # Add .to(device) here
+    td_instance = td_instance.to(device)
+    td_reset = env.reset(td_instance).to(device)
+    actions = evaluate(model, td_reset.clone(), env)["best_aug_actions"]
+    routes = extract_routes_from_actions(actions, is_open=is_open)
+    #
+    route_delivery = get_route_delivery(
+        df,
+        equipment,
+        routes[0],
+        order_number_id,
+        num_stack,
+        unit_type,
+        distances,
+        durations,
+        pallets,
+        weights,
+        volumes,
+        time_windows,
+    )
+    runtime = time.perf_counter() - start_time
+    output = get_route_output(
+        req_id,
+        directory_ref,
+        col_date,
+        routes[0],
+        locations,
+        route_delivery,
+        variant,
+        dest_names,
+        order_number_id,
+        address_guids,
+        distances,
+        durations,
+        full_load_route,
+        runtime,
+    )
+    print(f"\nTotal Run Time: {runtime}s")
+    opt_utils.cosmos_upsert_data('hgs-output', 'route', output)
 # opt_utils.build_route(output)
 
